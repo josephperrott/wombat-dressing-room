@@ -220,6 +220,54 @@ describe('writePackage', () => {
   });
 
   describe('releaseAs2FA', () => {
+    it('allows dist-tag update (string payload) if release matches', async () => {
+      // Fake that there's a releaseAs2FA key in datastore:
+      sinon.stub(writePackage.datastore, 'getPublishKey').resolves({
+        username: 'bcoe',
+        created: 1578630249529,
+        value: 'deadbeef',
+        releaseAs2FA: true,
+      });
+      sinon.stub(writePackage.datastore, 'getUser').resolves({
+        name: 'bcoe',
+        token: 'deadbeef',
+      });
+      sinon
+        .stub(writePackage, 'pipeToNpm')
+        .callsFake((_req, _res, _body, newPackage) => {
+          return Promise.resolve({statusCode: 200, newPackage});
+        });
+
+      // simulate a dist-tag update (the payload is just the version string)
+      const req = writePackageRequest(
+        {authorization: 'token: abc123'},
+        '1.0.0'
+      );
+      const res = mockResponse();
+
+      const npmRequest = nock('https://registry.npmjs.org')
+        .get('/@soldair%2ffoo')
+        .reply(
+          200,
+          createPackument('@soldair/foo')
+            .addVersion('0.1.0', 'https://github.com/foo/bar')
+            .packument()
+        );
+
+      const githubRequest = nock('https://api.github.com')
+        // user has push access to repo in package.json
+        .get('/repos/foo/bar')
+        .reply(200, {permissions: {push: true}})
+        // Matching release found on GitHub.
+        .get('/repos/foo/bar/releases/tags/v1.0.0')
+        .reply(200, {name: 'v1.0.0'});
+
+      const ret = await writePackage('@soldair/foo', req, res);
+      npmRequest.done();
+      githubRequest.done();
+      expect(ret.statusCode).to.equal(200);
+    });
+
     it('appropriately routes initial package publication', async () => {
       // Fake that there's a releaseAs2FA key in datastore:
       sinon.stub(writePackage.datastore, 'getPublishKey').resolves({

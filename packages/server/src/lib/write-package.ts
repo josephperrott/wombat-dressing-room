@@ -213,7 +213,8 @@ export const writePackage = async (
         user.token,
         newPackage ? undefined : docFromNpm,
         drainedBody,
-        pubKey.monorepo
+        pubKey.monorepo,
+        packageName
       );
     } catch (_e) {
       const e = _e as {statusMessage: string; statusCode: number};
@@ -295,61 +296,75 @@ async function enforceMatchingRelease(
   token: string,
   lastPackument: Packument | undefined,
   drainedBody: Buffer,
-  monorepo?: boolean
+  monorepo?: boolean,
+  packageName?: string
 ) {
   try {
     const maybePackument = JSON.parse(drainedBody + '');
-    if (
-      typeof maybePackument !== 'object' ||
-      maybePackument['dist-tags'] === undefined
-    ) {
-      throw new WombatServerError(
-        'Release-backed tokens should be used exclusively for publication.',
-        400
-      );
-    }
-    // Check whether the publish document contains either a
-    // "latest" or "next" tag:
-    const newPackument = maybePackument as Packument;
-    let newVersionPackument =
-      newPackument.versions[newPackument['dist-tags'].latest || ''];
-    if (!newVersionPackument) {
-      newVersionPackument =
-        newPackument.versions[newPackument['dist-tags'].next || ''];
-    }
-    if (!newVersionPackument) {
-      throw new WombatServerError(
-        'No "latest" or "next" version found in packument.',
-        400
-      );
-    }
-    let newVersion = newVersionPackument.version;
+    let newVersion: string;
+    let activePackageName = packageName; // Use passed in package name by default
 
-    // If this is not the first package publication, we infer the version being
-    // published by comparing the new and old packument:
-    if (lastPackument) {
-      console.info(
-        `${newPackument.name} has been published before, comparing versions`
-      );
-      const versions = newVersions(lastPackument, newPackument);
-      if (versions.length !== 1) {
+    if (typeof maybePackument === 'string') {
+      // 1. Tag Update Scenario: npm dist-tag add sends the version as a JSON string
+      newVersion = maybePackument;
+    } else if (
+      typeof maybePackument === 'object' &&
+      maybePackument !== null &&
+      maybePackument['dist-tags'] !== undefined
+    ) {
+      // 2. Package Publish Scenario
+      const newPackument = maybePackument as Packument;
+      activePackageName = newPackument.name; // Use Packument name for publication
+
+      let newVersionPackument =
+        newPackument.versions[newPackument['dist-tags'].latest || ''];
+      if (!newVersionPackument) {
+        newVersionPackument =
+          newPackument.versions[newPackument['dist-tags'].next || ''];
+      }
+      if (!newVersionPackument) {
         throw new WombatServerError(
-          'No new versions found in packument. Release-backed tokens should be used exclusively for publication.',
+          'No "latest" or "next" version found in packument.',
           400
         );
-      } else {
-        newVersion = versions[0];
       }
+      newVersion = newVersionPackument.version;
+
+      if (lastPackument) {
+        console.info(
+          `${newPackument.name} has been published before, comparing versions`
+        );
+        const versions = newVersions(lastPackument, newPackument);
+        if (versions.length !== 1) {
+          throw new WombatServerError(
+            'No new versions found in packument. Release-backed tokens should be used exclusively for publication.',
+            400
+          );
+        } else {
+          newVersion = versions[0];
+        }
+      }
+    } else {
+      // 3. Invalid Scenario
+      throw new WombatServerError(
+        'Release-backed tokens should be used exclusively for publication or tagging a specific version.',
+        400
+      );
     }
+
     let prefix;
     const tags = [];
     if (monorepo) {
-      const splitName = newPackument.name.split('/');
+      if (!activePackageName) {
+        throw new WombatServerError(
+          'Cannot verify monorepo tags without package name.',
+          400
+        );
+      }
+      const splitName = activePackageName.split('/');
       prefix = splitName.length === 1 ? splitName[0] : splitName[1];
-      // release-please-style monorepo tags: package-v2.0.1
       tags.push(`${prefix}-v${newVersion}`);
-      // lerna-style monorepo tags: @scope/package@2.0.1
-      tags.push(`${newPackument.name}@${newVersion}`);
+      tags.push(`${activePackageName}@${newVersion}`);
     } else {
       tags.push(`v${newVersion}`);
     }
