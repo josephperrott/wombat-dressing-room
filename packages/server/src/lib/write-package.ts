@@ -208,13 +208,17 @@ export const writePackage = async (
     console.info('token uses releases as 2FA');
     drainedBody = drainedBody || (await drainRequest(req));
     try {
+      const {version, name} = getPublishVersion(
+        drainedBody,
+        newPackage ? undefined : docFromNpm,
+        packageName
+      );
       await enforceMatchingRelease(
         repo.name,
         user.token,
-        newPackage ? undefined : docFromNpm,
-        drainedBody,
+        version,
         pubKey.monorepo,
-        packageName
+        name
       );
     } catch (_e) {
       const e = _e as {statusMessage: string; statusCode: number};
@@ -287,18 +291,11 @@ async function enforceRepositoryPermission(repoName: string, user: User) {
   }
 }
 
-/*
- * Throws an exception if a matching GitHub release cannot be found for the
- * packument that is being published to npm.
- */
-async function enforceMatchingRelease(
-  repoName: string,
-  token: string,
-  lastPackument: Packument | undefined,
+function getPublishVersion(
   drainedBody: Buffer,
-  monorepo?: boolean,
-  packageName?: string
-) {
+  lastPackument: Packument | undefined,
+  packageName: string
+): {version: string; name: string} {
   try {
     const maybePackument = JSON.parse(drainedBody + '');
     let newVersion: string;
@@ -351,26 +348,49 @@ async function enforceMatchingRelease(
         400
       );
     }
+    return {version: newVersion, name: activePackageName};
+  } catch (err) {
+    if (err instanceof WombatServerError) {
+      throw err;
+    }
+    if (err instanceof Error) {
+      throw new WombatServerError(err.message || 'unknown error', 500);
+    }
+    throw new WombatServerError('unknown error', 500);
+  }
+}
 
+/*
+ * Throws an exception if a matching GitHub release cannot be found for the
+ * version that is being published to npm.
+ */
+async function enforceMatchingRelease(
+  repoName: string,
+  token: string,
+  version: string,
+  monorepo: boolean | undefined,
+  packageName: string
+) {
+  try {
     let prefix;
     const tags = [];
     if (monorepo) {
-      if (!activePackageName) {
+      if (!packageName) {
         throw new WombatServerError(
           'Cannot verify monorepo tags without package name.',
           400
         );
       }
-      const splitName = activePackageName.split('/');
+      const splitName = packageName.split('/');
       prefix = splitName.length === 1 ? splitName[0] : splitName[1];
-      tags.push(`${prefix}-v${newVersion}`);
-      tags.push(`${activePackageName}@${newVersion}`);
+      tags.push(`${prefix}-v${version}`);
+      tags.push(`${packageName}@${version}`);
     } else {
-      tags.push(`v${newVersion}`);
+      tags.push(`v${version}`);
     }
     const release = await github.getRelease(repoName, token, tags);
     if (!release) {
-      const msg = `matching release v${newVersion} not found for ${repoName}. Did not find any tags matching: ${tags.join()}`;
+      const msg = `matching release v${version} not found for ${repoName}. Did not find any tags matching: ${tags.join()}`;
       throw new WombatServerError(msg, 400);
     }
   } catch (err) {
